@@ -26,7 +26,7 @@ from django.contrib import admin
 from course.models import (
         UserStatus,
         Course, Event,
-        Participation, ParticipationPreapproval,
+        ParticipationTag, Participation, ParticipationPreapproval,
         InstantFlowRequest,
         FlowSession, FlowPageData,
         FlowPageVisit, FlowPageVisitGrade,
@@ -143,6 +143,12 @@ admin.site.register(Event, EventAdmin)
 
 # {{{ participation
 
+class ParticipationTagAdmin(admin.ModelAdmin):
+    list_filter = ("course",)
+
+admin.site.register(ParticipationTag, ParticipationTagAdmin)
+
+
 class ParticipationAdmin(admin.ModelAdmin):
     def get_user_first_name(self, obj):
         return obj.user.first_name
@@ -165,6 +171,8 @@ class ParticipationAdmin(admin.ModelAdmin):
             "status",
             "enroll_time")
     list_filter = ("course", "role", "status")
+
+    filter_horizontal = ("tags",)
 
     search_fields = (
             "course__identifier",

@@ -186,6 +186,18 @@ class Event(models.Model):
 
 # {{{ participation
 
+class ParticipationTag(models.Model):
+    course = models.ForeignKey(Course)
+    name = models.CharField(max_length=100,
+            help_text="Format: lower-case-with-hyphens")
+    description = models.CharField(max_length=100)
+    shown_to_participant = models.BooleanField(default=False)
+    set_by_participant = models.BooleanField(default=False)
+
+    def __unicode__(self):
+        return "%s in %s" % (self.name, self.course)
+
+
 class Participation(models.Model):
     user = models.ForeignKey(User)
     course = models.ForeignKey(Course)
@@ -205,9 +217,20 @@ class Participation(models.Model):
     preview_git_commit_sha = models.CharField(max_length=200, null=True,
             blank=True)
 
+    tags = models.ManyToManyField(ParticipationTag, required=False)
+
     def __unicode__(self):
         return "%s in %s as %s" % (
                 self.user, self.course, self.role)
+
+    def clean(self):
+        super(Participation, self).clean()
+
+        for tag in self.tags.all():
+            if tag.course != self.course:
+                raise ValidationError(
+                        "Tag '%s' is from different course than participation"
+                        % tag)
 
     class Meta:
         unique_together = (("user", "course"),)
