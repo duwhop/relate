@@ -104,7 +104,7 @@ def format_datetime_local(datetime, format='medium'):
     try:
         locale = to_locale(settings.LANGUAGE_CODE)
     except ValueError:
-        locale="en_US"
+        locale = "en_US"
 
     result = format_datetime(datetime, format, locale=locale)
 
@@ -136,6 +136,78 @@ def struct_to_dict(data):
             (name, val)
             for name, val in six.iteritems(data.__dict__)
             if not name.startswith("_"))
+
+# }}}
+
+
+def retry_transaction(f, args, kwargs={}, max_tries=None, serializable=None):
+    from django.db import transaction
+    from django.db.utils import OperationalError
+
+    if max_tries is None:
+        max_tries = 5
+    if serializable is None:
+        serializable = False
+
+    assert max_tries > 0
+    while True:
+        try:
+            with transaction.atomic():
+                if serializable:
+                    from django.db import connections, DEFAULT_DB_ALIAS
+                    conn = connections[DEFAULT_DB_ALIAS]
+                    if conn.vendor == "postgresql":
+                        cursor = conn.cursor()
+                        cursor.execute(
+                                "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
+
+                return f(*args, **kwargs)
+        except OperationalError:
+            max_tries -= 1
+            if not max_tries:
+                raise
+
+
+class retry_transaction_decorator(object):
+    def __init__(self, max_tries=None, serializable=None):
+        self.max_tries = max_tries
+        self.serializable = serializable
+
+    def __call__(self, f):
+        from functools import update_wrapper
+
+        def wrapper(*args, **kwargs):
+            return retry_transaction(f, args, kwargs,
+                    max_tries=self.max_tries,
+                    serializable=self.serializable)
+
+        update_wrapper(wrapper, f)
+        return wrapper
+
+
+# {{{ hang debugging
+
+def dumpstacks(signal, frame):
+    import threading
+    import sys
+    import traceback
+
+    id2name = dict([(th.ident, th.name) for th in threading.enumerate()])
+    code = []
+    for threadId, stack in sys._current_frames().items():
+        code.append("\n# Thread: %s(%d)" % (id2name.get(threadId, ""), threadId))
+        for filename, lineno, name, line in traceback.extract_stack(stack):
+            code.append('File: "%s", line %d, in %s' % (filename, lineno, name))
+            if line:
+                code.append("  %s" % (line.strip()))
+    print "\n".join(code)
+
+if 0:
+    import signal
+    import os
+    print("*** HANG DUMP HANDLER ACTIVATED: 'kill -USR1 %s' to dump stacks"
+            % os.getpid())
+    signal.signal(signal.SIGUSR1, dumpstacks)
 
 # }}}
 

@@ -28,7 +28,7 @@ THE SOFTWARE.
 from django.utils.translation import ugettext as _
 from django.shortcuts import (  # noqa
         get_object_or_404, redirect)
-from django.db import transaction
+from relate.utils import retry_transaction_decorator
 from django.core.exceptions import (  # noqa
         PermissionDenied, SuspiciousOperation,
         ObjectDoesNotExist)
@@ -45,12 +45,14 @@ from course.utils import (
         get_session_grading_rule,
         FlowPageContext)
 from course.views import get_now_or_fake_time
+from django.conf import settings
+from django.utils import translation
 
 
 # {{{ grading driver
 
 @course_view
-@transaction.atomic
+@retry_transaction_decorator()
 def grade_flow_page(pctx, flow_session_id, page_ordinal):
     page_ordinal = int(page_ordinal)
 
@@ -156,9 +158,10 @@ def grade_flow_page(pctx, flow_session_id, page_ordinal):
                         fpctx.page_context, fpctx.page_data, grade_data,
                         grading_form, request.FILES)
 
-                feedback = fpctx.page.grade(
-                        fpctx.page_context, fpctx.page_data,
-                        answer_data, grade_data)
+                with translation.override(settings.RELATE_ADMIN_EMAIL_LOCALE):
+                    feedback = fpctx.page.grade(
+                            fpctx.page_context, fpctx.page_data,
+                            answer_data, grade_data)
 
                 if feedback is not None:
                     correctness = feedback.correctness

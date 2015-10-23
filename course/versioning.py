@@ -39,6 +39,7 @@ from django.utils.translation import (
         pgettext_lazy,
         string_concat,
         )
+from django_select2.forms import Select2Widget
 from bootstrap3_datetime.widgets import DateTimePicker
 
 from django.db import transaction
@@ -59,6 +60,25 @@ class AutoAcceptPolicy(paramiko.client.MissingHostKeyPolicy):
     def missing_host_key(self, client, hostname, key):
         # simply accept the key
         return
+
+
+def _remove_prefix(prefix, s):
+    assert s.startswith(prefix)
+
+    return s[len(prefix):]
+
+
+def transfer_remote_refs(repo, remote_refs):
+    valid_refs = []
+    for ref, sha in six.iteritems(remote_refs):
+        if (ref.startswith(b"refs/heads/")
+                and not ref.startswith(b"refs/heads/origin/")):
+            new_ref = "refs/remotes/origin/"+_remove_prefix(b"refs/heads/", ref)
+            valid_refs.append(new_ref)
+            repo[new_ref] = sha
+    for ref in repo.get_refs().keys():
+        if ref.startswith(b"refs/remotes/origin/") and ref not in valid_refs:
+            del repo[ref]
 
 
 # {{{ shell quoting
@@ -239,6 +259,7 @@ def set_up_new_course(request):
                                     new_course)
 
                         remote_refs = client.fetch(remote_path, repo)
+                        transfer_remote_refs(repo, remote_refs)
                         new_sha = repo[b"HEAD"] = remote_refs[b"HEAD"]
 
                         vrepo = repo
@@ -363,6 +384,7 @@ def run_course_update_command(
             get_dulwich_client_and_remote_path_from_course(pctx.course)
 
         remote_refs = client.fetch(remote_path, repo)
+        transfer_remote_refs(repo, remote_refs)
         remote_head = remote_refs[b"HEAD"]
         if (
                 prevent_discarding_revisions
@@ -436,17 +458,41 @@ def run_course_update_command(
 
 
 class GitUpdateForm(StyledForm):
-    new_sha = forms.CharField(required=True,
-            label=pgettext_lazy(
-                "new git SHA for revision of course contents",
-                "New git SHA"))
-    prevent_discarding_revisions = forms.BooleanField(
-            label=_("Prevent updating to a git revision "
-                "prior to the current one"),
-            initial=True, required=False)
 
-    def __init__(self, may_update, previewing, *args, **kwargs):
+    def __init__(self, may_update, previewing, repo, *args, **kwargs):
         super(GitUpdateForm, self).__init__(*args, **kwargs)
+
+        repo_refs = repo.get_refs()
+        commit_iter = repo.get_walker(list(repo_refs.values()))
+
+        def format_commit(commit):
+            return "%s - %s" % (
+                    commit.id[:8],
+                    "".join(commit.message.split("\n")[:1]))
+
+        def format_sha(sha):
+            return format_commit(repo[sha])
+
+        self.fields["new_sha"] = forms.ChoiceField(
+                choices=([
+                    (repo_refs[ref],
+                        "[%s] %s" % (ref, format_sha(repo_refs[ref])))
+                    for ref in repo_refs
+                    ] +
+                    [
+                    (entry.commit.id, format_commit(entry.commit))
+                    for entry in commit_iter
+                    ]),
+                required=True,
+                widget=Select2Widget(),
+                label=pgettext_lazy(
+                    "new git SHA for revision of course contents",
+                    "New git SHA"))
+
+        self.fields["prevent_discarding_revisions"] = forms.BooleanField(
+                label=_("Prevent updating to a git revision "
+                    "prior to the current one"),
+                initial=True, required=False)
 
         def add_button(desc, label):
             self.helper.add_input(Submit(desc, label))
@@ -457,9 +503,9 @@ class GitUpdateForm(StyledForm):
 
         if previewing:
             add_button("end_preview", _("End preview"))
-        else:
-            add_button("fetch_preview", _("Fetch and preview"))
-            add_button("preview", _("Preview"))
+
+        add_button("fetch_preview", _("Fetch and preview"))
+        add_button("preview", _("Preview"))
 
         add_button("fetch", _("Fetch"))
 
@@ -493,7 +539,8 @@ def update_course(pctx):
 
     response_form = None
     if request.method == "POST":
-        form = GitUpdateForm(may_update, previewing, request.POST, request.FILES)
+        form = GitUpdateForm(may_update, previewing, repo, request.POST,
+            request.FILES)
         commands = ["fetch", "fetch_update", "update", "fetch_preview",
                 "preview", "end_preview"]
 
@@ -533,7 +580,7 @@ def update_course(pctx):
         previewing = bool(participation is not None
                 and participation.preview_git_commit_sha)
 
-        form = GitUpdateForm(may_update, previewing,
+        form = GitUpdateForm(may_update, previewing, repo,
                 {
                     "new_sha": repo.head(),
                     "prevent_discarding_revisions": True,

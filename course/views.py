@@ -45,6 +45,8 @@ from django.utils.translation import (
 from django.utils.functional import lazy
 from django.contrib.auth.decorators import login_required
 
+from django_select2.forms import Select2Widget
+
 mark_safe_lazy = lazy(mark_safe, six.text_type)
 
 from django.views.decorators.cache import cache_control
@@ -91,16 +93,23 @@ def home(request):
                 show = False
 
         if show:
-            if now_datetime.date() <= course.end_date:
+            if (course.end_date is None
+                    or now_datetime.date() <= course.end_date):
                 current_courses.append(course)
             else:
                 past_courses.append(course)
 
-    def course_sort_key(course):
-        return (course.start_date, course.identifier)
+    def course_sort_key_minor(course):
+        return course.number if course.number is not None else ""
 
-    current_courses.sort(key=course_sort_key, reverse=True)
-    past_courses.sort(key=course_sort_key, reverse=True)
+    def course_sort_key_major(course):
+        return (course.start_date
+                if course.start_date is not None else now_datetime.date())
+
+    current_courses.sort(key=course_sort_key_minor)
+    past_courses.sort(key=course_sort_key_minor)
+    current_courses.sort(key=course_sort_key_major, reverse=True)
+    past_courses.sort(key=course_sort_key_major, reverse=True)
 
     return render(request, "course/home.html", {
         "current_courses": current_courses,
@@ -129,7 +138,7 @@ def course_page(pctx):
     chunks = get_processed_course_chunks(
             pctx.course, pctx.repo, pctx.course_commit_sha, pctx.course_desc,
             pctx.role, get_now_or_fake_time(pctx.request),
-            remote_address=pctx.remote_address)
+            facilities=pctx.request.relate_facilities)
 
     show_enroll_button = (
             pctx.course.accepts_enrollment
@@ -330,6 +339,82 @@ def fake_time_context_processor(request):
 # }}}
 
 
+# {{{ space travel (i.e. pretend to be in facility)
+
+class FakeFacilityForm(StyledForm):
+    def __init__(self, *args, **kwargs):
+        from django.conf import settings
+
+        super(FakeFacilityForm, self).__init__(*args, **kwargs)
+
+        self.fields["facilities"] = forms.MultipleChoiceField(
+                choices=(
+                    (name, name)
+                    for name in settings.RELATE_FACILITIES),
+                widget=forms.CheckboxSelectMultiple,
+                required=False,
+                label=_("Facilities"),
+                help_text=_("Facilities you wish to pretend to be in"))
+
+        self.fields["custom_facilities"] = forms.CharField(
+                label=_("Custom facilities"),
+                required=False,
+                help_text=_("More (non-predefined) facility names, separated "
+                    "by commas, which would like to pretend to be in"))
+
+        self.helper.add_input(
+                # Translators: "set" fake facility.
+                Submit("set", _("Set")))
+        self.helper.add_input(
+                # Translators: "unset" fake facility.
+                Submit("unset", _("Unset")))
+
+
+def set_pretend_facilities(request):
+    if not request.user.is_staff:
+        raise PermissionDenied(_("only staff may set fake facility"))
+
+    if request.method == "POST":
+        form = FakeFacilityForm(request.POST)
+        do_set = "set" in form.data
+        if form.is_valid():
+            if do_set:
+                pretend_facilities = (
+                        form.cleaned_data["facilities"]
+                        + [s.strip()
+                            for s in (
+                                form.cleaned_data["custom_facilities"].split(","))
+                            if s.strip()])
+
+                request.session["relate_pretend_facilities"] = pretend_facilities
+            else:
+                request.session.pop("relate_pretend_facilities", None)
+
+    else:
+        if "relate_pretend_facilities" in request.session:
+            form = FakeFacilityForm({
+                "facilities": [],
+                "custom_facilities": ",".join(
+                    request.session["relate_pretend_facilities"])
+                })
+        else:
+            form = FakeFacilityForm()
+
+    return render(request, "generic-form.html", {
+        "form": form,
+        "form_description": _("Pretend to be in Facilities"),
+    })
+
+
+def pretend_facilities_context_processor(request):
+    return {
+            "pretend_facilities": request.session.get(
+                "relate_pretend_facilities", []),
+            }
+
+# }}}
+
+
 # {{{ instant flow requests
 
 class InstantFlowRequestForm(StyledForm):
@@ -493,7 +578,8 @@ class ExceptionStage1Form(StyledForm):
                 required=True,
                 help_text=_("Select participant for whom exception is to "
                 "be granted."),
-                label=_("Participant"))
+                label=_("Participant"),
+                widget=Select2Widget())
         self.fields["flow_id"] = forms.ChoiceField(
                 choices=[(fid, fid) for fid in flow_ids],
                 required=True,
@@ -645,11 +731,12 @@ def grant_exception_stage_2(pctx, participation_id, flow_id):
     create_session_is_override = False
     if not session_start_rule.may_start_new_session:
         create_session_is_override = True
-        form_text += ("<div class='alert alert-info'>%s</div>"
-                "<i class='fa fa-info-circle'></i>" %
-                (_("Creating a new session is (technically) not allowed "
+        form_text += ("<div class='alert alert-info'>%s</div>" % (
+            string_concat(
+                "<i class='fa fa-info-circle'></i> ",
+                _("Creating a new session is (technically) not allowed "
                 "by course rules. Clicking 'Create Session' anyway will "
-                "override this rule.")))
+                "override this rule."))))
 
     default_tag = session_start_rule.tag_session
     if default_tag is None:
